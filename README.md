@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="assets/logo.png" alt="TrendCipher Logo" width="80" />
+<img src="assets/logo.png" alt="TrendCipher Logo" width="400" />
 
-# TrendCipher
+
 
 ### AI-Powered YouTube Trend Analysis — Any Language, Always English
 
@@ -19,7 +19,7 @@
 
 **TrendCipher** is an end-to-end AI-powered YouTube video analysis platform. Paste any YouTube URL — in Hindi, Marathi, Korean, Spanish, Turkish, Arabic, or 50+ other languages — and TrendCipher instantly delivers a structured English summary, engagement metrics, sentiment breakdown, trend score, and key topic extraction.
 
-Built as a final year project using a multi-agent AI pipeline with **CrewAI**, **Ollama (LLaMA 3)**, **BrightData**, and **Streamlit**.
+Built using a multi-agent AI pipeline with **CrewAI**, **Ollama (LLaMA 3)**, **BrightData**, and **Streamlit**.
 
 ---
 
@@ -232,7 +232,7 @@ Output is **always in English** regardless of input language.
 
 ## 👩‍💻 About
 
-Built by **Kanupriya Prachande** as a final year Computer Science project.
+Built by **Kanupriya Prachande** as a Computer Science project.
 
 - 🔗 [LinkedIn](https://linkedin.com/in/kanupriyaprachande)
 - 💻 [GitHub](https://github.com/kanupriyaprachande)
