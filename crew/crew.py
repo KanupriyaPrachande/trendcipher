@@ -5,9 +5,12 @@ from scraper.brightdata import scrape_youtube_video, fetch_transcript
 def _get(key):
     try:
         import streamlit as st
-        return st.secrets.get(key, os.getenv(key, ""))
+        val = st.secrets.get(key, "")
+        if val:
+            return val
     except:
-        return os.getenv(key, "")
+        pass
+    return os.getenv(key, "")
 
 
 def call_groq(prompt: str, system: str = "") -> str:
