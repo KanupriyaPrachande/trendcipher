@@ -1,33 +1,40 @@
-import json, re, os
-from scraper.brightdata import scrape_youtube_video, fetch_transcript
+import json, re, os, requests as req
 
 
 def _get(key):
     try:
         import streamlit as st
         val = st.secrets.get(key, "")
-        if val:
-            return val
+        if val: return val
     except:
         pass
     return os.getenv(key, "")
 
 
 def call_groq(prompt: str, system: str = "") -> str:
-    """Call Groq API directly — no CrewAI needed."""
-    from groq import Groq
-    client = Groq(api_key=_get("GROQ_API_KEY"))
+    """Call Groq API via raw HTTP — no SDK needed."""
+    api_key = _get("GROQ_API_KEY")
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
-    response = client.chat.completions.create(
-        model="llama3-8b-8192",
-        messages=messages,
-        temperature=0.3,
-        max_tokens=1024,
+
+    response = req.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": "llama3-8b-8192",
+            "messages": messages,
+            "temperature": 0.3,
+            "max_tokens": 1024,
+        },
+        timeout=30,
     )
-    return response.choices[0].message.content.strip()
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"].strip()
 
 
 def fmt(n):
@@ -48,8 +55,8 @@ def derive_sentiment(likes, dislikes, comments, views, title=""):
     elif like_rate > 1.5: pos = 63
     elif like_rate > 0.8: pos = 55
     else:                 pos = 45
-    if dislike_rate > 2:   pos -= 20
-    elif dislike_rate > 1: pos -= 12
+    if dislike_rate > 2:     pos -= 20
+    elif dislike_rate > 1:   pos -= 12
     elif dislike_rate > 0.3: pos -= 6
     if comment_rate > 0.1: pos = min(pos + 5, 90)
     title_lower = title.lower()
@@ -75,7 +82,8 @@ def derive_views_curve(views, likes):
 
 
 def run_analysis(url: str) -> dict:
-    # ── Scrape ────────────────────────────────────────────
+    from scraper.brightdata import scrape_youtube_video, fetch_transcript
+
     metadata  = scrape_youtube_video(url)
     video_id  = metadata["video_id"]
     views     = int(metadata.get("view_count", 0))
@@ -97,57 +105,56 @@ TRANSCRIPT: {transcript[:3000] if has_transcript else 'Not available'}
 VIEWS: {views:,} | LIKES: {likes:,} | COMMENTS: {comments:,}
 """
 
-    # ── Agent 1: Detect & Translate ───────────────────────
-    lang_result = call_groq(
-        prompt=f"Detect the language of this YouTube video content and return ONLY the language name (e.g. English, Hindi, Spanish):\n\nTITLE: {title}\nDESCRIPTION: {desc[:300]}",
-        system="You are a language detection expert. Return only the language name, nothing else."
-    )
-    detected_language = lang_result.strip().split("\n")[0][:30]
+    # ── Detect language ───────────────────────────────────
+    try:
+        lang_result = call_groq(
+            prompt=f"Detect the language of this YouTube video. Return ONLY the language name:\nTITLE: {title}\nDESCRIPTION: {desc[:200]}",
+            system="Return only the language name. Examples: English, Hindi, Spanish, Korean."
+        )
+        detected_language = lang_result.strip().split("\n")[0][:30]
+    except Exception as e:
+        detected_language = "English"
 
-    # ── Agent 2: Summarize ────────────────────────────────
-    summary = call_groq(
-        prompt=(
-            f"Write a 3-4 sentence plain English summary of this YouTube video.\n\n{content}\n\n"
-            "RULES:\n"
-            "- Use ONLY the information provided above\n"
-            "- Do NOT invent content\n"
-            "- Do NOT add disclaimers or notes\n"
-            "- Write directly, no preamble\n"
-            "- If transcript is not available, summarize based on title and description only"
-        ),
-        system="You are a YouTube video summarizer. Write concise, accurate English summaries based only on provided data. Never hallucinate."
-    )
-    # Clean up any meta-commentary
-    lines = [l for l in summary.splitlines()
-             if not any(l.lower().startswith(x) for x in ["note:","based on","as provided","i am","here's","here is"])]
-    summary = " ".join(lines).strip() or summary.strip()
+    # ── Summarize ─────────────────────────────────────────
+    try:
+        summary_raw = call_groq(
+            prompt=(
+                f"Write a 3-4 sentence plain English summary of this YouTube video.\n\n{content}\n\n"
+                "Rules: Use ONLY the data above. Do NOT invent content. No disclaimers. Write directly."
+            ),
+            system="You summarize YouTube videos accurately in English. Never hallucinate. Use only provided data."
+        )
+        lines = [l for l in summary_raw.splitlines()
+                 if not any(l.lower().startswith(x) for x in ["note:","based on","as provided","i am","here's","here is"])]
+        summary = " ".join(lines).strip() or summary_raw.strip()
+    except Exception as e:
+        summary = f"This video titled '{title}' was published by {channel}."
 
-    # ── Agent 3: Analyze ──────────────────────────────────
-    analysis_raw = call_groq(
-        prompt=(
-            f"Analyze this YouTube video and return ONLY a valid JSON object.\n\n"
-            f"TITLE: {title}\nCHANNEL: {channel}\nVIEWS: {views:,}\nLIKES: {likes:,}\n\n"
-            "Return this exact JSON structure with no markdown, no explanation:\n"
-            '{"topics":["topic1","topic2","topic3","topic4","topic5"],'
-            '"trend_score":7.5,'
-            '"trend_label":"Trending 🔥",'
-            '"sentiment_positive":70,'
-            '"sentiment_neutral":20,'
-            '"sentiment_negative":10,'
-            '"insights":["insight 1","insight 2","insight 3"]}'
-        ),
-        system="You are a YouTube analytics expert. Return only valid JSON. Base topics and insights on the actual video title provided."
-    )
-
+    # ── Analyze ───────────────────────────────────────────
     analysis = {}
     try:
+        analysis_raw = call_groq(
+            prompt=(
+                f"Analyze this YouTube video. Return ONLY valid JSON, no markdown:\n"
+                f"TITLE: {title}\nCHANNEL: {channel}\nVIEWS: {views:,}\nLIKES: {likes:,}\n\n"
+                '{"topics":["topic1","topic2","topic3","topic4","topic5"],'
+                '"trend_score":7.5,'
+                '"trend_label":"Trending 🔥",'
+                '"sentiment_positive":70,'
+                '"sentiment_neutral":20,'
+                '"sentiment_negative":10,'
+                '"insights":["insight 1","insight 2","insight 3"]}'
+            ),
+            system="Return only valid JSON. No explanation. Base topics on the actual video title."
+        )
         clean = re.sub(r"```json|```", "", analysis_raw).strip()
         analysis = json.loads(clean)
     except:
-        m = re.search(r"\{.*\}", analysis_raw, re.DOTALL)
-        if m:
-            try: analysis = json.loads(m.group(0))
-            except: analysis = {}
+        try:
+            m = re.search(r"\{.*\}", analysis_raw, re.DOTALL)
+            if m: analysis = json.loads(m.group(0))
+        except:
+            analysis = {}
 
     # ── Sentiment ─────────────────────────────────────────
     ai_pos = analysis.get("sentiment_positive")
@@ -161,28 +168,28 @@ VIEWS: {views:,} | LIKES: {likes:,} | COMMENTS: {comments:,}
     else:
         pos, neu, neg = derive_sentiment(likes, dislikes, comments, views, title)
 
-    # ── Trend Score ───────────────────────────────────────
+    # ── Trend score ───────────────────────────────────────
     trend_score = analysis.get("trend_score")
     if not trend_score:
         eng = ((likes+comments)/views*100) if views > 0 else 0
-        if eng > 5:     trend_score = round(8.5+min(eng-5,5)*0.1,1)
-        elif eng > 3:   trend_score = round(7.0+(eng-3)*0.5,1)
-        elif eng > 1.5: trend_score = round(5.5+(eng-1.5)*0.7,1)
-        elif eng > 0.5: trend_score = round(4.0+(eng-0.5)*1.2,1)
-        else:           trend_score = round(max(2.0,eng*4),1)
+        if eng > 5:     trend_score = round(8.5+min(eng-5,5)*0.1, 1)
+        elif eng > 3:   trend_score = round(7.0+(eng-3)*0.5, 1)
+        elif eng > 1.5: trend_score = round(5.5+(eng-1.5)*0.7, 1)
+        elif eng > 0.5: trend_score = round(4.0+(eng-0.5)*1.2, 1)
+        else:           trend_score = round(max(2.0, eng*4), 1)
 
     trend_label = analysis.get("trend_label") or (
-        "Viral 🚀" if float(trend_score)>=8.5 else
-        "Trending 🔥" if float(trend_score)>=6.5 else
-        "Growing 📈" if float(trend_score)>=4.5 else "Steady 📊"
+        "Viral 🚀"    if float(trend_score) >= 8.5 else
+        "Trending 🔥" if float(trend_score) >= 6.5 else
+        "Growing 📈"  if float(trend_score) >= 4.5 else "Steady 📊"
     )
 
-    eng_rate = round(((likes+comments)/views*100),2) if views>0 else 0
+    eng_rate = round(((likes+comments)/views*100), 2) if views > 0 else 0
     eng_quality = ("Excellent" if eng_rate>5 else "Good" if eng_rate>3 else "Average" if eng_rate>1 else "Low")
 
     return {
         "title": title, "channel": channel,
-        "published_at": metadata.get("published_at",""),
+        "published_at": metadata.get("published_at", ""),
         "url": url, "detected_language": detected_language,
         "views_raw": views, "likes_raw": likes,
         "dislikes_raw": dislikes, "comments_raw": comments,
@@ -191,19 +198,19 @@ VIEWS: {views:,} | LIKES: {likes:,} | COMMENTS: {comments:,}
         "engagement_rate": f"{eng_rate}%",
         "engagement_quality": eng_quality,
         "summary": summary,
-        "topics": analysis.get("topics",[]),
-        "insights": analysis.get("insights",[]),
+        "topics": analysis.get("topics", []),
+        "insights": analysis.get("insights", []),
         "trend_score": trend_score,
         "trend_label": trend_label,
         "sentiment_positive": pos,
-        "sentiment_neutral": neu,
+        "sentiment_neutral":  neu,
         "sentiment_negative": neg,
         "views_over_time": derive_views_curve(views, likes),
         "engagement_breakdown": [
-            {"metric":"Likes","value":likes},
-            {"metric":"Comments","value":comments},
-            {"metric":"Dislikes","value":max(dislikes,0)},
+            {"metric": "Likes",    "value": likes},
+            {"metric": "Comments", "value": comments},
+            {"metric": "Dislikes", "value": max(dislikes, 0)},
         ],
-        "like_view_ratio": f"{round(likes/views*100,2)}%" if views else "—",
+        "like_view_ratio":    f"{round(likes/views*100,2)}%" if views else "—",
         "comment_view_ratio": f"{round(comments/views*100,3)}%" if views else "—",
     }
